@@ -32,7 +32,7 @@ if [ ${#REQUIRED_PKGS[@]} -gt 0 ]; then
 fi
 
 echo -e "${CYAN}====================================================================${NC}"
-echo -e "${CYAN}   ALL-IN-ONE AI Proxy Master (Gemini, ChatGPT, Codex, Claude Code)${NC}"
+echo -e "${CYAN}   ALL-IN-ONE AI Proxy Master (Gemini, ChatGPT, Claude, OpenCode)${NC}"
 echo -e "${CYAN}====================================================================${NC}"
 echo ""
 echo "Куда нужно установить и настроить AI-прокси?"
@@ -85,6 +85,56 @@ EOF
     exit 0
 fi
 
+# ==============================================================================
+# ВЫБОР AI-СЕРВИСОВ ДЛЯ МАРШРУТИЗАЦИИ
+# ==============================================================================
+echo ""
+echo -e "${CYAN}Какие сервисы направлять через прокси?${NC}"
+echo -e "  ${GREEN}1)${NC} ${YELLOW}ВСЕ сервисы сразу${NC} (Google/Gemini + OpenAI/ChatGPT + Claude + OpenRouter/Cursor/Aider)"
+echo -e "  ${GREEN}2)${NC} Только ${YELLOW}Google & Gemini${NC} (Gemini App, AI Studio, Antigravity agy)"
+echo -e "  ${GREEN}3)${NC} Только ${YELLOW}OpenAI & ChatGPT${NC} (ChatGPT App/Web, Codex, Sora, API)"
+echo -e "  ${GREEN}4)${NC} Только ${YELLOW}Anthropic Claude${NC} (Claude.ai, Claude Code CLI, API)"
+echo -e "  ${GREEN}5)${NC} ${YELLOW}Выбрать вручную через запятую${NC} (например: 2,3)"
+echo ""
+read -p "Выбери сервисы [1-5]: " SERVICE_CHOICE
+
+ENABLE_GOOGLE=false
+ENABLE_OPENAI=false
+ENABLE_CLAUDE=false
+ENABLE_DEV_TOOLS=false
+
+case "$SERVICE_CHOICE" in
+    1)
+        ENABLE_GOOGLE=true
+        ENABLE_OPENAI=true
+        ENABLE_CLAUDE=true
+        ENABLE_DEV_TOOLS=true
+        ;;
+    2)
+        ENABLE_GOOGLE=true
+        ;;
+    3)
+        ENABLE_OPENAI=true
+        ;;
+    4)
+        ENABLE_CLAUDE=true
+        ;;
+    5)
+        read -p "Введи номера через запятую (2=Google, 3=OpenAI, 4=Claude, 5=DevTools/OpenRouter): " CUSTOM_CHOICES
+        [[ "$CUSTOM_CHOICES" =~ 2 ]] && ENABLE_GOOGLE=true
+        [[ "$CUSTOM_CHOICES" =~ 3 ]] && ENABLE_OPENAI=true
+        [[ "$CUSTOM_CHOICES" =~ 4 ]] && ENABLE_CLAUDE=true
+        [[ "$CUSTOM_CHOICES" =~ 5 ]] && ENABLE_DEV_TOOLS=true
+        ;;
+    *)
+        echo -e "${YELLOW}Выбран вариант по умолчанию: ВСЕ сервисы.${NC}"
+        ENABLE_GOOGLE=true
+        ENABLE_OPENAI=true
+        ENABLE_CLAUDE=true
+        ENABLE_DEV_TOOLS=true
+        ;;
+esac
+
 echo ""
 echo -e "${CYAN}Введи данные SOCKS5 прокси.${NC}"
 echo "Можно вставить одной строкой в формате IP:PORT:USER:PASS"
@@ -130,10 +180,10 @@ if [[ "$GL" == '"GL":"RU"' ]]; then
 fi
 
 # ==============================================================================
-# ФУНКЦИЯ 1: Настройка 3x-ui (Gemini + ChatGPT/Codex + Claude Code + OpenCode/Cursor)
+# ФУНКЦИЯ 1: Настройка 3x-ui (с учетом выбранных сервисов)
 # ==============================================================================
 setup_3x_ui() {
-    echo -e "\n${CYAN}---> Настраиваем 3x-ui (VLESS / Xray) для всех AI-сервисов...${NC}"
+    echo -e "\n${CYAN}---> Настраиваем 3x-ui (VLESS / Xray)...${NC}"
     DB_PATH="/etc/x-ui/x-ui.db"
     if [[ ! -f "$DB_PATH" ]]; then
         echo -e "${RED}База $DB_PATH не найдена! Пропускаем настройку 3x-ui.${NC}"
@@ -143,6 +193,7 @@ setup_3x_ui() {
     cp "$DB_PATH" "${DB_PATH}.bak"
     echo "Бэкап базы сохранен в ${DB_PATH}.bak"
 
+    ENABLE_GOOGLE="$ENABLE_GOOGLE" ENABLE_OPENAI="$ENABLE_OPENAI" ENABLE_CLAUDE="$ENABLE_CLAUDE" ENABLE_DEV_TOOLS="$ENABLE_DEV_TOOLS" \
     PROXY_IP="$PROXY_IP" PROXY_PORT="$PROXY_PORT" PROXY_USER="$PROXY_USER" PROXY_PASS="$PROXY_PASS" python3 - << 'EOF'
 import os, sqlite3, json
 
@@ -151,6 +202,11 @@ proxy_ip = os.environ["PROXY_IP"]
 proxy_port = int(os.environ["PROXY_PORT"])
 proxy_user = os.environ.get("PROXY_USER", "")
 proxy_pass = os.environ.get("PROXY_PASS", "")
+
+enable_google = os.environ.get("ENABLE_GOOGLE") == "true"
+enable_openai = os.environ.get("ENABLE_OPENAI") == "true"
+enable_claude = os.environ.get("ENABLE_CLAUDE") == "true"
+enable_dev = os.environ.get("ENABLE_DEV_TOOLS") == "true"
 
 conn = sqlite3.connect(db_path)
 cur = conn.cursor()
@@ -162,10 +218,8 @@ if not row:
 cfg = json.loads(row[0])
 outbounds = cfg.setdefault("outbounds", [])
 
-# Удаляем старые прокси-исходящие
 outbounds = [o for o in outbounds if o.get("tag") not in ("ai-proxy", "gemini-proxy", "warp-proxy")]
 
-# Гарантируем, что direct (freedom) стоит первым в списке outbounds
 direct_idx = next((i for i, o in enumerate(outbounds) if o.get("protocol") == "freedom"), None)
 if direct_idx is not None and direct_idx > 0:
     direct_ob = outbounds.pop(direct_idx)
@@ -197,84 +251,95 @@ block_tag = next((o.get("tag") for o in outbounds if o.get("protocol") == "black
 routing = cfg.setdefault("routing", {})
 rules = routing.setdefault("rules", [])
 
-# Очищаем старые AI правила
 rules = [
     r for r in rules
     if r.get("outboundTag") not in ("ai-proxy", "gemini-proxy", "warp-proxy")
-    and not (r.get("network") == "udp" and r.get("port") == "443" and ("geoip:google" in r.get("ip", []) or "geosite:google-gemini" in r.get("domain", [])))
+    and not (r.get("network") == "udp" and r.get("port") == "443" and ("geoip:google" in r.get("ip", []) or "geosite:openai" in r.get("domain", []) or "geosite:google-gemini" in r.get("domain", [])))
 ]
 
-ai_domains = [
-    # Google & Gemini & Antigravity & AI Studio
-    "geosite:google-gemini",
-    "geosite:google",
-    "domain:gemini.google.com",
-    "domain:bard.google.com",
-    "domain:aistudio.google.com",
-    "domain:generativelanguage.googleapis.com",
-    "domain:proactivebackend-pa.googleapis.com",
-    "domain:alkalimakersuite-pa.clients6.google.com",
-    "domain:antigravity.google",
-    "domain:cloudcode-pa.googleapis.com",
-    "domain:cloudaicompanion.googleapis.com",
-    # OpenAI & ChatGPT & Codex & Sora
-    "geosite:openai",
-    "domain:openai.com",
-    "domain:chatgpt.com",
-    "domain:oaistatic.com",
-    "domain:oaiusercontent.com",
-    "domain:sora.com",
-    "domain:openai.org",
-    # Anthropic & Claude & Claude Code
-    "geosite:anthropic",
-    "domain:anthropic.com",
-    "domain:claude.ai",
-    "domain:claude.com",
-    "domain:claudeusercontent.com",
-    "domain:statsig.anthropic.com",
-    # Дополнительные AI-сервисы, шлюзы и CLI (OpenCode, Cursor, Aider, OpenRouter, Grok, Perplexity)
-    "domain:openrouter.ai",
-    "domain:groq.com",
-    "domain:together.xyz",
-    "domain:x.ai",
-    "domain:grok.com",
-    "domain:cursor.sh",
-    "domain:cursor.com",
-    "domain:perplexity.ai",
-    "domain:copilot.microsoft.com"
-]
+ai_domains = []
+ai_ips = []
 
-ai_ips = [
-    "geoip:google",
-    "160.79.104.0/23"
-]
+if enable_google:
+    ai_domains.extend([
+        "geosite:google-gemini",
+        "geosite:google",
+        "domain:gemini.google.com",
+        "domain:bard.google.com",
+        "domain:aistudio.google.com",
+        "domain:generativelanguage.googleapis.com",
+        "domain:proactivebackend-pa.googleapis.com",
+        "domain:alkalimakersuite-pa.clients6.google.com",
+        "domain:antigravity.google",
+        "domain:cloudcode-pa.googleapis.com",
+        "domain:cloudaicompanion.googleapis.com"
+    ])
+    ai_ips.append("geoip:google")
 
-new_rules = [
-    {
+if enable_openai:
+    ai_domains.extend([
+        "geosite:openai",
+        "domain:openai.com",
+        "domain:chatgpt.com",
+        "domain:oaistatic.com",
+        "domain:oaiusercontent.com",
+        "domain:sora.com",
+        "domain:openai.org"
+    ])
+
+if enable_claude:
+    ai_domains.extend([
+        "geosite:anthropic",
+        "domain:anthropic.com",
+        "domain:claude.ai",
+        "domain:claude.com",
+        "domain:claudeusercontent.com",
+        "domain:statsig.anthropic.com"
+    ])
+    ai_ips.append("160.79.104.0/23")
+
+if enable_dev:
+    ai_domains.extend([
+        "domain:openrouter.ai",
+        "domain:groq.com",
+        "domain:together.xyz",
+        "domain:x.ai",
+        "domain:grok.com",
+        "domain:cursor.sh",
+        "domain:cursor.com",
+        "domain:perplexity.ai",
+        "domain:copilot.microsoft.com"
+    ])
+
+new_rules = []
+if ai_domains:
+    new_rules.append({
         "type": "field",
         "outboundTag": block_tag,
         "network": "udp",
         "port": "443",
         "domain": ai_domains
-    },
-    {
+    })
+if ai_ips:
+    new_rules.append({
         "type": "field",
         "outboundTag": block_tag,
         "network": "udp",
         "port": "443",
         "ip": ai_ips
-    },
-    {
+    })
+if ai_domains:
+    new_rules.append({
         "type": "field",
         "outboundTag": "ai-proxy",
         "domain": ai_domains
-    },
-    {
+    })
+if ai_ips:
+    new_rules.append({
         "type": "field",
         "outboundTag": "ai-proxy",
         "ip": ai_ips
-    }
-]
+    })
 
 insert_pos = 1 if (rules and "geoip:private" in rules[0].get("ip", [])) else 0
 for idx, rule in enumerate(new_rules):
@@ -289,14 +354,14 @@ print("Конфигурация 3x-ui успешно обновлена в БД!
 EOF
 
     systemctl restart x-ui
-    echo -e "${GREEN}✓ 3x-ui перезапущен! Исходящий 'ai-proxy' (Gemini, ChatGPT/Codex, Claude, OpenCode/OpenRouter) добавлен автоматически.${NC}"
+    echo -e "${GREEN}✓ 3x-ui перезапущен! Выбранные сервисы успешно добавлены в маршрутизацию.${NC}"
 }
 
 # ==============================================================================
-# ФУНКЦИЯ 2: Настройка Amnezia VPN (все контейнеры через redsocks + ipset)
+# ФУНКЦИЯ 2: Настройка Amnezia VPN (с учетом выбранных сервисов)
 # ==============================================================================
 setup_amnezia() {
-    echo -e "\n${CYAN}---> Настраиваем Amnezia VPN (Gemini + ChatGPT + Claude + OpenRouter)...${NC}"
+    echo -e "\n${CYAN}---> Настраиваем Amnezia VPN...${NC}"
     export DEBIAN_FRONTEND=noninteractive
     apt-get install -y -qq redsocks ipset jq curl dnsutils >/dev/null 2>&1 || true
 
@@ -327,48 +392,58 @@ EOF
     systemctl enable redsocks >/dev/null 2>&1
     systemctl restart redsocks
 
-    cat << 'EOF' > /usr/local/bin/amnezia-google-proxy.sh
+    cat << EOF > /usr/local/bin/amnezia-google-proxy.sh
 #!/bin/bash
 set -e
 
 ipset create google_ips hash:net -exist
 ipset flush google_ips
 
-for ip in $(curl -s https://www.gstatic.com/ipranges/goog.json | jq -r '.prefixes[].ipv4Prefix | select(. != null)'); do
-    ipset add google_ips "$ip" -exist
-done
+ENABLE_GOOGLE=$ENABLE_GOOGLE
+ENABLE_OPENAI=$ENABLE_OPENAI
+ENABLE_CLAUDE=$ENABLE_CLAUDE
+ENABLE_DEV_TOOLS=$ENABLE_DEV_TOOLS
 
-for cidr in 142.250.0.0/15 172.217.0.0/16 172.253.0.0/16 216.58.192.0/19 74.125.0.0/16 108.177.0.0/17 64.233.160.0/19 209.85.128.0/17 160.79.104.0/23; do
-    ipset add google_ips "$cidr" -exist
-done
+AI_HOSTS=()
 
-AI_HOSTS=(
-    "chatgpt.com" "api.openai.com" "auth.openai.com" "platform.openai.com"
-    "ios.chat.openai.com" "android.chat.openai.com" "ab.chatgpt.com" "ws.chatgpt.com"
-    "chat.openai.com" "oaistatic.com" "oaiusercontent.com" "sora.com"
-    "claude.ai" "api.anthropic.com" "console.anthropic.com" "statsig.anthropic.com"
-    "gemini.google.com" "aistudio.google.com" "generativelanguage.googleapis.com"
-    "proactivebackend-pa.googleapis.com" "alkalimakersuite-pa.clients6.google.com"
-    "antigravity.google" "cloudcode-pa.googleapis.com" "cloudaicompanion.googleapis.com"
-    "openrouter.ai" "api.groq.com" "api.together.xyz"
-    "grok.com" "api.x.ai" "perplexity.ai" "api2.cursor.sh"
-)
+if [ "\$ENABLE_GOOGLE" = true ]; then
+    for ip in \$(curl -s https://www.gstatic.com/ipranges/goog.json | jq -r '.prefixes[].ipv4Prefix | select(. != null)'); do
+        ipset add google_ips "\$ip" -exist
+    done
+    for cidr in 142.250.0.0/15 172.217.0.0/16 172.253.0.0/16 216.58.192.0/19 74.125.0.0/16 108.177.0.0/17 64.233.160.0/19 209.85.128.0/17; do
+        ipset add google_ips "\$cidr" -exist
+    done
+    AI_HOSTS+=("gemini.google.com" "aistudio.google.com" "generativelanguage.googleapis.com" "proactivebackend-pa.googleapis.com" "alkalimakersuite-pa.clients6.google.com" "antigravity.google" "cloudcode-pa.googleapis.com" "cloudaicompanion.googleapis.com")
+fi
 
-for host in "${AI_HOSTS[@]}"; do
-    for ip in $(dig +short A "$host" @1.1.1.1 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'); do
-        ipset add google_ips "$ip" -exist
+if [ "\$ENABLE_OPENAI" = true ]; then
+    AI_HOSTS+=("chatgpt.com" "api.openai.com" "auth.openai.com" "platform.openai.com" "ios.chat.openai.com" "android.chat.openai.com" "ab.chatgpt.com" "ws.chatgpt.com" "chat.openai.com" "oaistatic.com" "oaiusercontent.com" "sora.com")
+fi
+
+if [ "\$ENABLE_CLAUDE" = true ]; then
+    ipset add google_ips "160.79.104.0/23" -exist
+    AI_HOSTS+=("claude.ai" "api.anthropic.com" "console.anthropic.com" "statsig.anthropic.com")
+fi
+
+if [ "\$ENABLE_DEV_TOOLS" = true ]; then
+    AI_HOSTS+=("openrouter.ai" "api.groq.com" "api.together.xyz" "grok.com" "api.x.ai" "perplexity.ai" "api2.cursor.sh")
+fi
+
+for host in "\${AI_HOSTS[@]}"; do
+    for ip in \$(dig +short A "\$host" @1.1.1.1 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'); do
+        ipset add google_ips "\$ip" -exist
     done
 done
 
 for SUBNET in 172.16.0.0/12 10.8.0.0/16; do
-    iptables -C INPUT -s "$SUBNET" -p tcp --dport 12345 -j ACCEPT 2>/dev/null || \
-    iptables -I INPUT -s "$SUBNET" -p tcp --dport 12345 -j ACCEPT
+    iptables -C INPUT -s "\$SUBNET" -p tcp --dport 12345 -j ACCEPT 2>/dev/null || \
+    iptables -I INPUT -s "\$SUBNET" -p tcp --dport 12345 -j ACCEPT
 
-    iptables -t mangle -C PREROUTING -s "$SUBNET" -m set --match-set google_ips dst -p udp --dport 443 -j DROP 2>/dev/null || \
-    iptables -t mangle -I PREROUTING -s "$SUBNET" -m set --match-set google_ips dst -p udp --dport 443 -j DROP
+    iptables -t mangle -C PREROUTING -s "\$SUBNET" -m set --match-set google_ips dst -p udp --dport 443 -j DROP 2>/dev/null || \
+    iptables -t mangle -I PREROUTING -s "\$SUBNET" -m set --match-set google_ips dst -p udp --dport 443 -j DROP
 
-    iptables -t nat -C PREROUTING -s "$SUBNET" -m set --match-set google_ips dst -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 12345 2>/dev/null || \
-    iptables -t nat -I PREROUTING -s "$SUBNET" -m set --match-set google_ips dst -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 12345
+    iptables -t nat -C PREROUTING -s "\$SUBNET" -m set --match-set google_ips dst -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 12345 2>/dev/null || \
+    iptables -t nat -I PREROUTING -s "\$SUBNET" -m set --match-set google_ips dst -p tcp -m multiport --dports 80,443 -j REDIRECT --to-ports 12345
 done
 EOF
 
@@ -376,7 +451,7 @@ EOF
 
     cat << 'EOF' > /etc/systemd/system/amnezia-google-proxy.service
 [Unit]
-Description=Route Amnezia AI traffic (Gemini, ChatGPT, Claude) through SOCKS5 Proxy
+Description=Route Amnezia AI traffic through SOCKS5 Proxy
 After=network-online.target docker.service redsocks.service
 Wants=network-online.target
 
@@ -392,11 +467,11 @@ EOF
 
     systemctl daemon-reload
     systemctl enable --now amnezia-google-proxy.service
-    echo -e "${GREEN}✓ Amnezia VPN настроена! Трафик AI со всех контейнеров идет через прокси.${NC}"
+    echo -e "${GREEN}✓ Amnezia VPN настроена! Выбранные сервисы идут через прокси.${NC}"
 }
 
 # ==============================================================================
-# ФУНКЦИЯ 3: Настройка консольных CLI на сервере (OpenCode, Aider, Claude, agy, codex)
+# ФУНКЦИЯ 3: Настройка консольных CLI на сервере
 # ==============================================================================
 setup_cli_tools() {
     echo -e "\n${CYAN}---> Настраиваем консольные CLI и агент-утилиты на сервере...${NC}"
@@ -405,12 +480,9 @@ setup_cli_tools() {
 
     cat << EOF >> ~/.bashrc
 # AI-PROXY-ALIASES-START
-# Универсальная функция-обертка для ЛЮБОЙ команды через прокси: proxyrun <любая_команда>
 proxyrun() {
     HTTPS_PROXY="${CURL_PROXY}" HTTP_PROXY="${CURL_PROXY}" ALL_PROXY="${CURL_PROXY}" "\$@"
 }
-
-# Авто-алиасы для популярных AI CLI инструментов
 alias agy="HTTPS_PROXY=${CURL_PROXY} HTTP_PROXY=${CURL_PROXY} ALL_PROXY=${CURL_PROXY} agy"
 alias claude="HTTPS_PROXY=${CURL_PROXY} HTTP_PROXY=${CURL_PROXY} ALL_PROXY=${CURL_PROXY} claude"
 alias codex="HTTPS_PROXY=${CURL_PROXY} HTTP_PROXY=${CURL_PROXY} ALL_PROXY=${CURL_PROXY} codex"
@@ -421,8 +493,7 @@ alias cursor="HTTPS_PROXY=${CURL_PROXY} HTTP_PROXY=${CURL_PROXY} ALL_PROXY=${CUR
 # AI-PROXY-ALIASES-END
 EOF
     echo -e "${GREEN}✓ Добавлены алиасы: opencode, aider, claude, codex, agy, gemini, cursor!${NC}"
-    echo -e "${CYAN}💡 Бонус: добавлена функция 'proxyrun'. Ты можешь запустить ВООБЩЕ ЛЮБУЮ CLI через прокси:${NC}"
-    echo -e "   Пример: ${YELLOW}proxyrun npm start${NC} или ${YELLOW}proxyrun python main.py${NC} или ${YELLOW}proxyrun open-code${NC}"
+    echo -e "${CYAN}💡 Функция 'proxyrun': запуск любой команды через прокси (например 'proxyrun opencode').${NC}"
     echo -e "   (Выполни ${YELLOW}source ~/.bashrc${NC}, чтобы обновить текущее окно терминала)."
 }
 
@@ -441,5 +512,4 @@ esac
 echo ""
 echo -e "${GREEN}====================================================================${NC}"
 echo -e "${GREEN}   ВСЁ ГОТОВО! AI-Прокси ${EXT_IP} (${GL}) успешно подключен!${NC}"
-echo -e "${GREEN}   Работают: Gemini, ChatGPT, Codex, Claude Code, OpenCode, Aider${NC}"
 echo -e "${GREEN}====================================================================${NC}"
