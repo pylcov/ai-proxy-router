@@ -1,11 +1,35 @@
 #!/bin/bash
 set -e
 
+# Проверка запуска от root
+if [[ $EUID -ne 0 ]]; then
+    echo -e "\033[0;31mОШИБКА: Этот скрипт должен быть запущен с правами root (sudo -i)\033[0m"
+    exit 1
+fi
+
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 CYAN='\033[0;36m'
 NC='\033[0m'
+
+# Проверяем и тихо доустанавливаем минимально необходимые системные утилиты
+REQUIRED_PKGS=()
+for cmd in curl jq python3 dig iptables ipset; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        case "$cmd" in
+            dig) REQUIRED_PKGS+=("dnsutils") ;;
+            *) REQUIRED_PKGS+=("$cmd") ;;
+        esac
+    fi
+done
+
+if [ ${#REQUIRED_PKGS[@]} -gt 0 ]; then
+    echo -e "${YELLOW}Доустанавливаем необходимые системные пакеты (${REQUIRED_PKGS[*]})...${NC}"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq >/dev/null 2>&1 || true
+    apt-get install -y -qq "${REQUIRED_PKGS[@]}" >/dev/null 2>&1 || true
+fi
 
 echo -e "${CYAN}====================================================================${NC}"
 echo -e "${CYAN}   ALL-IN-ONE AI Proxy Master (Gemini, ChatGPT, Codex, Claude Code)${NC}"
@@ -82,14 +106,11 @@ fi
 
 echo ""
 echo -e "${YELLOW}Проверяем связь с прокси ${PROXY_IP}:${PROXY_PORT} и страну в базе Google...${NC}"
-DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl jq python3 dnsutils >/dev/null
 
 if [[ -n "$PROXY_USER" ]]; then
     CURL_PROXY="socks5h://${PROXY_USER}:${PROXY_PASS}@${PROXY_IP}:${PROXY_PORT}"
-    HTTP_PROXY_URL="http://${PROXY_USER}:${PROXY_PASS}@${PROXY_IP}:${PROXY_PORT}"
 else
     CURL_PROXY="socks5h://${PROXY_IP}:${PROXY_PORT}"
-    HTTP_PROXY_URL="http://${PROXY_IP}:${PROXY_PORT}"
 fi
 
 EXT_IP=$(curl -x "$CURL_PROXY" -4 -m 10 -s https://api.ipify.org || true)
@@ -222,11 +243,10 @@ ai_domains = [
 
 ai_ips = [
     "geoip:google",
-    "160.79.104.0/23"  # Официальная подсеть Anthropic (Claude API & Claude Code)
+    "160.79.104.0/23"
 ]
 
 new_rules = [
-    # 1. Блокируем QUIC (UDP 443) к AI-доменам и IP, чтобы мобильные приложения шли строго по TCP через прокси
     {
         "type": "field",
         "outboundTag": block_tag,
@@ -241,13 +261,11 @@ new_rules = [
         "port": "443",
         "ip": ai_ips
     },
-    # 2. Заворачиваем все AI-домены в наш прокси
     {
         "type": "field",
         "outboundTag": "ai-proxy",
         "domain": ai_domains
     },
-    # 3. Заворачиваем IP-подсети Google и Anthropic в наш прокси
     {
         "type": "field",
         "outboundTag": "ai-proxy",
@@ -276,7 +294,8 @@ EOF
 # ==============================================================================
 setup_amnezia() {
     echo -e "\n${CYAN}---> Настраиваем Amnezia VPN (Gemini + ChatGPT + Claude)...${NC}"
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redsocks ipset jq curl dnsutils >/dev/null
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get install -y -qq redsocks ipset jq curl dnsutils >/dev/null 2>&1 || true
 
     AUTH_BLOCK=""
     if [[ -n "$PROXY_USER" ]]; then
@@ -312,17 +331,14 @@ set -e
 ipset create google_ips hash:net -exist
 ipset flush google_ips
 
-# 1. Официальные подсети Google (Gemini, AI Studio, Antigravity)
 for ip in $(curl -s https://www.gstatic.com/ipranges/goog.json | jq -r '.prefixes[].ipv4Prefix | select(. != null)'); do
     ipset add google_ips "$ip" -exist
 done
 
-# 2. Базовые подсети Google и официальная подсеть Anthropic (Claude / Claude Code: 160.79.104.0/23)
 for cidr in 142.250.0.0/15 172.217.0.0/16 172.253.0.0/16 216.58.192.0/19 74.125.0.0/16 108.177.0.0/17 64.233.160.0/19 209.85.128.0/17 160.79.104.0/23; do
     ipset add google_ips "$cidr" -exist
 done
 
-# 3. Динамически резолвим IP-адреса OpenAI (ChatGPT, Codex), Anthropic (Claude) и других ИИ
 AI_HOSTS=(
     "chatgpt.com" "api.openai.com" "auth.openai.com" "platform.openai.com"
     "ios.chat.openai.com" "android.chat.openai.com" "ab.chatgpt.com" "ws.chatgpt.com"
@@ -340,7 +356,6 @@ for host in "${AI_HOSTS[@]}"; do
     done
 done
 
-# 4. Применяем правила iptables для всех контейнеров Amnezia (172.16.0.0/12 и 10.8.0.0/16)
 for SUBNET in 172.16.0.0/12 10.8.0.0/16; do
     iptables -C INPUT -s "$SUBNET" -p tcp --dport 12345 -j ACCEPT 2>/dev/null || \
     iptables -I INPUT -s "$SUBNET" -p tcp --dport 12345 -j ACCEPT
