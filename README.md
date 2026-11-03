@@ -12,6 +12,8 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/pylcov/ai-proxy-router/main/setup-ai-proxy.sh)
 ```
 
+> **Примечание:** `git` на сервере не требуется! Скрипт сам автоматически проверит и установит все недостающие пакеты (`python3`, `jq`, `dnsutils`, `ipset`, `iptables`, `redsocks`).
+
 ---
 
 ## 🛠 Возможности
