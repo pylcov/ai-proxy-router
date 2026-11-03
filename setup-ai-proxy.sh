@@ -38,7 +38,7 @@ echo ""
 echo "Куда нужно установить и настроить AI-прокси?"
 echo -e "  ${GREEN}1)${NC} Только для ${YELLOW}3x-ui (VLESS / Xray)${NC} — авто-добавление в Исходящие и Маршрутизацию"
 echo -e "  ${GREEN}2)${NC} Только для ${YELLOW}Amnezia VPN${NC} (все контейнеры 1.0 / 2.0 / 3.0)"
-echo -e "  ${GREEN}3)${NC} Только для консольных ИИ на сервере: ${YELLOW}agy, claude, codex, gemini${NC}"
+echo -e "  ${GREEN}3)${NC} Только для консольных CLI на сервере: ${YELLOW}OpenCode, Aider, Claude, agy, codex, cursor${NC}"
 echo -e "  ${GREEN}4)${NC} Установить ${YELLOW}ВСЁ СРАЗУ${NC} (3x-ui + Amnezia + CLI утилиты на сервере)"
 echo -e "  ${RED}5)${NC} Удалить прокси и вернуть всё в исходное состояние"
 echo ""
@@ -130,7 +130,7 @@ if [[ "$GL" == '"GL":"RU"' ]]; then
 fi
 
 # ==============================================================================
-# ФУНКЦИЯ 1: Настройка 3x-ui (Gemini + ChatGPT/Codex + Claude Code + Grok/Cursor)
+# ФУНКЦИЯ 1: Настройка 3x-ui (Gemini + ChatGPT/Codex + Claude Code + OpenCode/Cursor)
 # ==============================================================================
 setup_3x_ui() {
     echo -e "\n${CYAN}---> Настраиваем 3x-ui (VLESS / Xray) для всех AI-сервисов...${NC}"
@@ -232,7 +232,10 @@ ai_domains = [
     "domain:claude.com",
     "domain:claudeusercontent.com",
     "domain:statsig.anthropic.com",
-    # Дополнительные популярные ИИ (Grok, Cursor, Perplexity, Copilot)
+    # Дополнительные AI-сервисы, шлюзы и CLI (OpenCode, Cursor, Aider, OpenRouter, Grok, Perplexity)
+    "domain:openrouter.ai",
+    "domain:groq.com",
+    "domain:together.xyz",
     "domain:x.ai",
     "domain:grok.com",
     "domain:cursor.sh",
@@ -286,14 +289,14 @@ print("Конфигурация 3x-ui успешно обновлена в БД!
 EOF
 
     systemctl restart x-ui
-    echo -e "${GREEN}✓ 3x-ui перезапущен! Исходящий 'ai-proxy' (Gemini + ChatGPT/Codex + Claude Code) добавлен автоматически.${NC}"
+    echo -e "${GREEN}✓ 3x-ui перезапущен! Исходящий 'ai-proxy' (Gemini, ChatGPT/Codex, Claude, OpenCode/OpenRouter) добавлен автоматически.${NC}"
 }
 
 # ==============================================================================
 # ФУНКЦИЯ 2: Настройка Amnezia VPN (все контейнеры через redsocks + ipset)
 # ==============================================================================
 setup_amnezia() {
-    echo -e "\n${CYAN}---> Настраиваем Amnezia VPN (Gemini + ChatGPT + Claude)...${NC}"
+    echo -e "\n${CYAN}---> Настраиваем Amnezia VPN (Gemini + ChatGPT + Claude + OpenRouter)...${NC}"
     export DEBIAN_FRONTEND=noninteractive
     apt-get install -y -qq redsocks ipset jq curl dnsutils >/dev/null 2>&1 || true
 
@@ -347,6 +350,7 @@ AI_HOSTS=(
     "gemini.google.com" "aistudio.google.com" "generativelanguage.googleapis.com"
     "proactivebackend-pa.googleapis.com" "alkalimakersuite-pa.clients6.google.com"
     "antigravity.google" "cloudcode-pa.googleapis.com" "cloudaicompanion.googleapis.com"
+    "openrouter.ai" "api.groq.com" "api.together.xyz"
     "grok.com" "api.x.ai" "perplexity.ai" "api2.cursor.sh"
 )
 
@@ -388,27 +392,38 @@ EOF
 
     systemctl daemon-reload
     systemctl enable --now amnezia-google-proxy.service
-    echo -e "${GREEN}✓ Amnezia VPN настроена! Трафик Gemini, ChatGPT и Claude со всех контейнеров идет через прокси.${NC}"
+    echo -e "${GREEN}✓ Amnezia VPN настроена! Трафик AI со всех контейнеров идет через прокси.${NC}"
 }
 
 # ==============================================================================
-# ФУНКЦИЯ 3: Настройка консольных CLI на сервере (agy, claude, codex, gemini)
+# ФУНКЦИЯ 3: Настройка консольных CLI на сервере (OpenCode, Aider, Claude, agy, codex)
 # ==============================================================================
 setup_cli_tools() {
-    echo -e "\n${CYAN}---> Настраиваем консольные утилиты (agy, claude, codex, gemini) на сервере...${NC}"
+    echo -e "\n${CYAN}---> Настраиваем консольные CLI и агент-утилиты на сервере...${NC}"
     sed -i '/# AI-PROXY-ALIASES-START/,/# AI-PROXY-ALIASES-END/d' ~/.bashrc 2>/dev/null || true
     sed -i '/alias agy=/d' ~/.bashrc 2>/dev/null || true
 
     cat << EOF >> ~/.bashrc
 # AI-PROXY-ALIASES-START
+# Универсальная функция-обертка для ЛЮБОЙ команды через прокси: proxyrun <любая_команда>
+proxyrun() {
+    HTTPS_PROXY="${CURL_PROXY}" HTTP_PROXY="${CURL_PROXY}" ALL_PROXY="${CURL_PROXY}" "\$@"
+}
+
+# Авто-алиасы для популярных AI CLI инструментов
 alias agy="HTTPS_PROXY=${CURL_PROXY} HTTP_PROXY=${CURL_PROXY} ALL_PROXY=${CURL_PROXY} agy"
 alias claude="HTTPS_PROXY=${CURL_PROXY} HTTP_PROXY=${CURL_PROXY} ALL_PROXY=${CURL_PROXY} claude"
 alias codex="HTTPS_PROXY=${CURL_PROXY} HTTP_PROXY=${CURL_PROXY} ALL_PROXY=${CURL_PROXY} codex"
 alias gemini="HTTPS_PROXY=${CURL_PROXY} HTTP_PROXY=${CURL_PROXY} ALL_PROXY=${CURL_PROXY} gemini"
+alias opencode="HTTPS_PROXY=${CURL_PROXY} HTTP_PROXY=${CURL_PROXY} ALL_PROXY=${CURL_PROXY} opencode"
+alias aider="HTTPS_PROXY=${CURL_PROXY} HTTP_PROXY=${CURL_PROXY} ALL_PROXY=${CURL_PROXY} aider"
+alias cursor="HTTPS_PROXY=${CURL_PROXY} HTTP_PROXY=${CURL_PROXY} ALL_PROXY=${CURL_PROXY} cursor"
 # AI-PROXY-ALIASES-END
 EOF
-    echo -e "${GREEN}✓ Алиасы для 'agy', 'claude' (Claude Code), 'codex' (OpenAI Codex) и 'gemini' добавлены в ~/.bashrc!${NC}"
-    echo -e "  (Выполни ${YELLOW}source ~/.bashrc${NC}, чтобы они заработали в текущем окне терминала)."
+    echo -e "${GREEN}✓ Добавлены алиасы: opencode, aider, claude, codex, agy, gemini, cursor!${NC}"
+    echo -e "${CYAN}💡 Бонус: добавлена функция 'proxyrun'. Ты можешь запустить ВООБЩЕ ЛЮБУЮ CLI через прокси:${NC}"
+    echo -e "   Пример: ${YELLOW}proxyrun npm start${NC} или ${YELLOW}proxyrun python main.py${NC} или ${YELLOW}proxyrun open-code${NC}"
+    echo -e "   (Выполни ${YELLOW}source ~/.bashrc${NC}, чтобы обновить текущее окно терминала)."
 }
 
 case "$MODE_CHOICE" in
@@ -426,5 +441,5 @@ esac
 echo ""
 echo -e "${GREEN}====================================================================${NC}"
 echo -e "${GREEN}   ВСЁ ГОТОВО! AI-Прокси ${EXT_IP} (${GL}) успешно подключен!${NC}"
-echo -e "${GREEN}   Работают: Gemini, Antigravity, ChatGPT, Codex, Claude & Claude Code${NC}"
+echo -e "${GREEN}   Работают: Gemini, ChatGPT, Codex, Claude Code, OpenCode, Aider${NC}"
 echo -e "${GREEN}====================================================================${NC}"
