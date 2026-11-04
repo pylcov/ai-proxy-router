@@ -56,8 +56,10 @@ if [[ "$MODE_CHOICE" == "5" ]]; then
     rm -f /etc/systemd/system/amnezia-ai-proxy.service /usr/local/bin/amnezia-ai-proxy.sh
     rm -f /etc/systemd/system/amnezia-google-proxy.service /usr/local/bin/amnezia-google-proxy.sh
     rm -f /etc/systemd/system/amnezia-google-warp.service /usr/local/bin/amnezia-google-warp.sh
-    rm -f /etc/systemd/system/sing-box.service /usr/local/bin/sing-box
+    rm -f /etc/systemd/system/sing-box.service /usr/local/bin/sing-box /usr/bin/sing-box
     rm -rf /etc/sing-box /etc/redsocks.conf
+    ipset destroy google_ips_new 2>/dev/null || true
+    ipset destroy google_ips 2>/dev/null || true
     systemctl daemon-reload
     if systemctl is-active --quiet docker; then
         systemctl restart docker
@@ -283,7 +285,12 @@ if enable_google:
             "domain:ytimg.com",
             "domain:youtubei.googleapis.com",
             "domain:youtubekids.com",
-            "domain:yt.be"
+            "domain:youtube-nocookie.com",
+            "domain:wide-youtube.l.google.com",
+            "domain:yt.be",
+            "domain:gvt1.com",
+            "domain:gvt2.com",
+            "domain:gvt3.com"
         ]
     })
     ai_domains.extend([
@@ -395,7 +402,7 @@ setup_amnezia() {
     rm -f /etc/systemd/system/amnezia-google-proxy.service /usr/local/bin/amnezia-google-proxy.sh
 
     # Установка sing-box, если не установлен
-    if ! command -v sing-box >/dev/null 2>&1; then
+    if ! command -v sing-box >/dev/null 2>&1 || [[ ! -f /usr/local/bin/sing-box ]]; then
         echo -e "${YELLOW}Устанавливаем sing-box...${NC}"
         ARCH=$(uname -m)
         case "$ARCH" in
@@ -409,6 +416,9 @@ setup_amnezia() {
         chmod +x /usr/local/bin/sing-box
         rm -rf "/tmp/sing-box-${SB_VER}-linux-${SB_ARCH}"
     fi
+
+    # Создаем глобальный симлинк во избежание проблем с PATH в неинтерактивных сессиях
+    ln -sf /usr/local/bin/sing-box /usr/bin/sing-box
 
     # Генерация конфигурации sing-box
     mkdir -p /etc/sing-box
@@ -431,6 +441,12 @@ setup_amnezia() {
       "tag": "redirect-in",
       "listen": "0.0.0.0",
       "listen_port": 12345
+    },
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1",
+      "listen_port": 2080
     }
   ],
   "outbounds": [
@@ -451,6 +467,10 @@ setup_amnezia() {
         "action": "sniff"
       },
       {
+        "inbound": "mixed-in",
+        "outbound": "ai-proxy"
+      },
+      {
         "domain_suffix": [
           "youtube.com",
           "googlevideo.com",
@@ -459,7 +479,14 @@ setup_amnezia() {
           "yt.be",
           "ggpht.com",
           "youtubei.googleapis.com",
-          "youtubekids.com"
+          "youtubekids.com",
+          "youtube-nocookie.com",
+          "wide-youtube.l.google.com",
+          "nhacmp3youtube.com",
+          "gvt1.com",
+          "gvt2.com",
+          "gvt3.com",
+          "video.google.com"
         ],
         "outbound": "direct"
       }
@@ -468,6 +495,9 @@ setup_amnezia() {
   }
 }
 EOF
+
+    # Валидация конфигурации перед созданием службы
+    /usr/local/bin/sing-box check -c /etc/sing-box/config.json
 
     # Создание службы sing-box
     cat << 'EOF' > /etc/systemd/system/sing-box.service
@@ -491,13 +521,15 @@ EOF
     systemctl daemon-reload
     systemctl enable --now sing-box.service
 
-    # Создание скрипта заполнения ipset и правил iptables
+    # Создание скрипта заполнения ipset и правил iptables (с атомарной заменой)
     cat << EOF > /usr/local/bin/amnezia-ai-proxy.sh
 #!/bin/bash
 set -e
 
+# Атомарное обновление ipset через временный сет (без разрыва существующих соединений)
 ipset create google_ips hash:net -exist
-ipset flush google_ips
+ipset create google_ips_new hash:net -exist
+ipset flush google_ips_new
 
 ENABLE_GOOGLE=$ENABLE_GOOGLE
 ENABLE_OPENAI=$ENABLE_OPENAI
@@ -507,11 +539,13 @@ ENABLE_DEV_TOOLS=$ENABLE_DEV_TOOLS
 AI_HOSTS=()
 
 if [ "\$ENABLE_GOOGLE" = true ]; then
-    for ip in \$(curl -s https://www.gstatic.com/ipranges/goog.json | jq -r '.prefixes[].ipv4Prefix | select(. != null)'); do
-        ipset add google_ips "\$ip" -exist
-    done
+    # Базовые надежные подсети Google
     for cidr in 142.250.0.0/15 172.217.0.0/16 172.253.0.0/16 216.58.192.0/19 74.125.0.0/16 108.177.0.0/17 64.233.160.0/19 209.85.128.0/17; do
-        ipset add google_ips "\$cidr" -exist
+        ipset add google_ips_new "\$cidr" -exist 2>/dev/null || true
+    done
+    # Динамический пул подсетей Google
+    for ip in \$(curl -m 5 -s https://www.gstatic.com/ipranges/goog.json 2>/dev/null | jq -r '.prefixes[].ipv4Prefix | select(. != null)' 2>/dev/null || true); do
+        ipset add google_ips_new "\$ip" -exist 2>/dev/null || true
     done
     AI_HOSTS+=("gemini.google.com" "aistudio.google.com" "generativelanguage.googleapis.com" "proactivebackend-pa.googleapis.com" "alkalimakersuite-pa.clients6.google.com" "antigravity.google" "cloudcode-pa.googleapis.com" "cloudaicompanion.googleapis.com")
 fi
@@ -521,7 +555,7 @@ if [ "\$ENABLE_OPENAI" = true ]; then
 fi
 
 if [ "\$ENABLE_CLAUDE" = true ]; then
-    ipset add google_ips "160.79.104.0/23" -exist
+    ipset add google_ips_new "160.79.104.0/23" -exist 2>/dev/null || true
     AI_HOSTS+=("claude.ai" "api.anthropic.com" "console.anthropic.com" "statsig.anthropic.com")
 fi
 
@@ -530,12 +564,16 @@ if [ "\$ENABLE_DEV_TOOLS" = true ]; then
 fi
 
 for host in "\${AI_HOSTS[@]}"; do
-    for ip in \$(dig +short A "\$host" @1.1.1.1 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'); do
-        ipset add google_ips "\$ip" -exist
+    for ip in \$(dig +short +time=2 +tries=1 A "\$host" @1.1.1.1 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || true); do
+        ipset add google_ips_new "\$ip" -exist 2>/dev/null || true
     done
 done
 
-for SUBNET in 172.16.0.0/12 10.8.0.0/16; do
+# Атомарно переключаем актуальный ipset
+ipset swap google_ips_new google_ips
+ipset destroy google_ips_new 2>/dev/null || true
+
+for SUBNET in 172.16.0.0/12 10.8.0.0/16 172.29.172.0/24; do
     iptables -C INPUT -s "\$SUBNET" -p tcp --dport 12345 -j ACCEPT 2>/dev/null || \
     iptables -I INPUT -s "\$SUBNET" -p tcp --dport 12345 -j ACCEPT
 
