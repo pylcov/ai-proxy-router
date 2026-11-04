@@ -40,7 +40,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/pylcov/ai-proxy-router/main/
 Обычные решения «завернуть весь Google в прокси» приводят к тому, что YouTube начинает крутить иностранную рекламу (польскую, немецкую и т.д.), а 4K-видео тормозит через узкий канал прокси.
 В **AI Proxy Router** эта проблема решена:
 - **В 3x-ui (Xray)**: Добавляется приоритетное правило маршрутизации `geosite:youtube` и всех CDN-доменов Google Video → `direct` перед правилами AI.
-- **В Amnezia VPN**: Вместо устаревшего `redsocks` используется современный `sing-box` с TLS SNI-сниффингом. Он на лету определяет все домены YouTube (`youtube.com`, `googlevideo.com`, `youtu.be`, `ytimg.com`, `gvt1.com` и др.) и направляет их напрямую через сервер на максимальной скорости 4K/8K, в то время как Gemini, Antigravity и служебные бэкенды Google идут в прокси.
+- **В Amnezia VPN**: Используется современный `sing-box` с TLS SNI-сниффингом. Он на лету определяет все домены YouTube (`youtube.com`, `googlevideo.com`, `youtu.be`, `ytimg.com`, `gvt1.com` и др.) и направляет их напрямую через сервер на максимальной скорости 4K/8K, в то время как Gemini, Antigravity и служебные бэкенды Google идут в прокси.
 
 ### 3. 3x-ui (VLESS / Xray)
 - Напрямую модифицирует базу `/etc/x-ui/x-ui.db` без необходимости ручной настройки в браузере.
