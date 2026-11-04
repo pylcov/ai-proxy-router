@@ -11,6 +11,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 CYAN='\033[0;36m'
+BOLD='\033[1m'
 NC='\033[0m'
 
 # Проверяем и тихо доустанавливаем минимально необходимые системные утилиты
@@ -31,6 +32,136 @@ if [ ${#REQUIRED_PKGS[@]} -gt 0 ]; then
     apt-get install -y -qq "${REQUIRED_PKGS[@]}" >/dev/null 2>&1 || true
 fi
 
+# ==============================================================================
+# ФУНКЦИЯ ДИАГНОСТИКИ НЕЙРОСЕТЕЙ (ПРОВЕРКА РЕГИОНА И СТРАН)
+# ==============================================================================
+test_ai_services() {
+    local proxy="$1"
+    echo ""
+    echo -e "${CYAN}====================================================================${NC}"
+    echo -e "${CYAN}        ТЕСТИРОВАНИЕ РЕГИОНА И ДОСТУПНОСТИ НЕЙРОСЕТЕЙ...${NC}"
+    echo -e "${CYAN}====================================================================${NC}"
+
+    # 1. IP info
+    local ip_json
+    ip_json=$(curl -x "$proxy" -m 7 -s "http://ip-api.com/json/?fields=country,countryCode,city,isp,query" 2>/dev/null || true)
+    local ip country city isp
+    ip=$(echo "$ip_json" | jq -r '.query // empty')
+    country=$(echo "$ip_json" | jq -r '.country // empty')
+    city=$(echo "$ip_json" | jq -r '.city // empty')
+    isp=$(echo "$ip_json" | jq -r '.isp // empty')
+
+    if [[ -z "$ip" ]]; then
+        # Запасной запрос через ipify
+        ip=$(curl -x "$proxy" -4 -m 5 -s https://api.ipify.org 2>/dev/null || true)
+    fi
+
+    if [[ -z "$ip" ]]; then
+        echo -e "${RED}✗ ОШИБКА: Прокси не отвечает! Проверь IP, порт, логин и пароль.${NC}"
+        return 1
+    fi
+
+    echo -e "Внешний IP:            ${GREEN}${BOLD}${ip}${NC} (${isp:-Unknown}, ${city:-}, ${country:-})"
+    echo "--------------------------------------------------------------------"
+
+    local has_blocked=false
+
+    # 2. Google & Gemini
+    local gl gemini_api gemini_status
+    gl=$(curl -x "$proxy" -4 -m 7 -s https://www.youtube.com 2>/dev/null | grep -o '"GL":"[A-Z]*"' | head -n 1 | cut -d'"' -f4 || true)
+    gemini_api=$(curl -x "$proxy" -m 7 -s "https://generativelanguage.googleapis.com/v1beta/models?key=test" 2>/dev/null || true)
+    if echo "$gemini_api" | grep -q "User location is not supported"; then
+        gemini_status="${RED}⛔ Заблокирован (${gl:-RU} — регион не поддерживается)${NC}"
+        has_blocked=true
+    elif echo "$gemini_api" | grep -q "API_KEY_INVALID"; then
+        gemini_status="${GREEN}✓ Доступ открыт (${gl:-$country})${NC}"
+    elif [[ -n "$gl" ]]; then
+        gemini_status="${GREEN}✓ Регион Google: ${gl}${NC}"
+    else
+        gemini_status="${YELLOW}? Не удалось определить${NC}"
+    fi
+    printf "%-22s %b\n" "Google & Gemini:" "$gemini_status"
+
+    # 3. OpenAI & ChatGPT
+    local oai_trace oai_loc oai_colo oai_status
+    oai_trace=$(curl -x "$proxy" -m 7 -s https://chatgpt.com/cdn-cgi/trace 2>/dev/null || true)
+    oai_loc=$(echo "$oai_trace" | grep '^loc=' | cut -d'=' -f2)
+    oai_colo=$(echo "$oai_trace" | grep '^colo=' | cut -d'=' -f2)
+    if [[ "$oai_loc" == "RU" || "$oai_loc" == "BY" ]]; then
+        oai_status="${RED}⛔ Заблокирован ($oai_loc)${NC}"
+        has_blocked=true
+    elif [[ -n "$oai_loc" ]]; then
+        oai_status="${GREEN}✓ Доступ открыт ($oai_loc, ЦОД $oai_colo)${NC}"
+    else
+        oai_status="${YELLOW}? Не удалось определить${NC}"
+    fi
+    printf "%-22s %b\n" "OpenAI & ChatGPT:" "$oai_status"
+
+    # 4. Anthropic Claude
+    local claude_trace claude_loc claude_colo claude_status
+    claude_trace=$(curl -x "$proxy" -m 7 -s https://claude.ai/cdn-cgi/trace 2>/dev/null || true)
+    claude_loc=$(echo "$claude_trace" | grep '^loc=' | cut -d'=' -f2)
+    claude_colo=$(echo "$claude_trace" | grep '^colo=' | cut -d'=' -f2)
+    if [[ "$claude_loc" == "RU" || "$claude_loc" == "BY" ]]; then
+        claude_status="${RED}⛔ Заблокирован ($claude_loc)${NC}"
+        has_blocked=true
+    elif [[ -n "$claude_loc" ]]; then
+        claude_status="${GREEN}✓ Доступ открыт ($claude_loc, ЦОД $claude_colo)${NC}"
+    else
+        claude_status="${YELLOW}? Не удалось определить${NC}"
+    fi
+    printf "%-22s %b\n" "Anthropic Claude:" "$claude_status"
+
+    # 5. Perplexity & Cursor
+    local perp_trace perp_loc perp_status
+    perp_trace=$(curl -x "$proxy" -m 7 -s https://www.perplexity.ai/cdn-cgi/trace 2>/dev/null || true)
+    perp_loc=$(echo "$perp_trace" | grep '^loc=' | cut -d'=' -f2)
+    if [[ "$perp_loc" == "RU" || "$perp_loc" == "BY" ]]; then
+        perp_status="${RED}⛔ Заблокирован ($perp_loc)${NC}"
+        has_blocked=true
+    elif [[ -n "$perp_loc" ]]; then
+        perp_status="${GREEN}✓ Доступ открыт ($perp_loc)${NC}"
+    else
+        perp_status="${YELLOW}? Не удалось определить${NC}"
+    fi
+    printf "%-22s %b\n" "Perplexity & Cursor:" "$perp_status"
+    echo -e "${CYAN}====================================================================${NC}\n"
+
+    if [ "$has_blocked" = true ]; then
+        echo -e "${RED}ВНИМАНИЕ: Одна или несколько нейросетей видят заблокированный регион (RU/BY)!${NC}"
+        return 2
+    fi
+    return 0
+}
+
+# Ввод данных прокси
+prompt_proxy_credentials() {
+    echo ""
+    echo -e "${CYAN}Введи данные SOCKS5 прокси.${NC}"
+    echo "Можно вставить одной строкой в формате IP:PORT:USER:PASS"
+    echo "или просто ввести IP, и скрипт спросит остальное по шагам:"
+    read -p "Ввод (IP или IP:PORT:USER:PASS): " RAW_PROXY
+
+    if [[ "$RAW_PROXY" == *:*:*:* ]]; then
+        IFS=':' read -r PROXY_IP PROXY_PORT PROXY_USER PROXY_PASS <<< "$RAW_PROXY"
+    else
+        PROXY_IP="$RAW_PROXY"
+        read -p "Порт прокси (например 1080): " PROXY_PORT
+        read -p "Логин прокси (оставь пустым, если без пароля): " PROXY_USER
+        if [[ -n "$PROXY_USER" ]]; then
+            read -p "Пароль прокси: " PROXY_PASS
+        else
+            PROXY_PASS=""
+        fi
+    fi
+
+    if [[ -n "$PROXY_USER" ]]; then
+        CURL_PROXY="socks5h://${PROXY_USER}:${PROXY_PASS}@${PROXY_IP}:${PROXY_PORT}"
+    else
+        CURL_PROXY="socks5h://${PROXY_IP}:${PROXY_PORT}"
+    fi
+}
+
 echo -e "${CYAN}====================================================================${NC}"
 echo -e "${CYAN}   ALL-IN-ONE AI Proxy Master (Gemini, ChatGPT, Claude, OpenCode)${NC}"
 echo -e "${CYAN}====================================================================${NC}"
@@ -40,11 +171,20 @@ echo -e "  ${GREEN}1)${NC} Только для ${YELLOW}3x-ui (VLESS / Xray)${NC
 echo -e "  ${GREEN}2)${NC} Только для ${YELLOW}Amnezia VPN${NC} (все контейнеры 1.0 / 2.0 / 3.0)"
 echo -e "  ${GREEN}3)${NC} Только для консольных CLI на сервере: ${YELLOW}OpenCode, Aider, Claude, agy, codex, cursor${NC}"
 echo -e "  ${GREEN}4)${NC} Установить ${YELLOW}ВСЁ СРАЗУ${NC} (3x-ui + Amnezia + CLI утилиты на сервере)"
-echo -e "  ${RED}5)${NC} Удалить прокси и вернуть всё в исходное состояние"
+echo -e "  ${CYAN}5)${NC} ${YELLOW}Тест нейросетей${NC} — проверить, какую страну видит Gemini, ChatGPT, Claude"
+echo -e "  ${RED}6)${NC} Удалить прокси и вернуть всё в исходное состояние"
 echo ""
-read -p "Выбери вариант [1-5]: " MODE_CHOICE
+read -p "Выбери вариант [1-6]: " MODE_CHOICE
 
+# Режим 5: Только тест
 if [[ "$MODE_CHOICE" == "5" ]]; then
+    prompt_proxy_credentials
+    test_ai_services "$CURL_PROXY" || true
+    exit 0
+fi
+
+# Режим 6: Удаление и откат
+if [[ "$MODE_CHOICE" == "6" ]]; then
     echo -e "\n${YELLOW}Откатываем настройки AI-прокси в исходное состояние...${NC}"
     iptables -t nat -F PREROUTING 2>/dev/null || true
     iptables -t mangle -F PREROUTING 2>/dev/null || true
@@ -143,47 +283,18 @@ case "$SERVICE_CHOICE" in
         ;;
 esac
 
-echo ""
-echo -e "${CYAN}Введи данные SOCKS5 прокси.${NC}"
-echo "Можно вставить одной строкой в формате IP:PORT:USER:PASS"
-echo "или просто ввести IP, и скрипт спросит остальное по шагам:"
-read -p "Ввод (IP или IP:PORT:USER:PASS): " RAW_PROXY
+# Запрос данных прокси
+prompt_proxy_credentials
 
-if [[ "$RAW_PROXY" == *:*:*:* ]]; then
-    IFS=':' read -r PROXY_IP PROXY_PORT PROXY_USER PROXY_PASS <<< "$RAW_PROXY"
-else
-    PROXY_IP="$RAW_PROXY"
-    read -p "Порт прокси (например 1080): " PROXY_PORT
-    read -p "Логин прокси (оставь пустым, если без пароля): " PROXY_USER
-    if [[ -n "$PROXY_USER" ]]; then
-        read -p "Пароль прокси: " PROXY_PASS
-    else
-        PROXY_PASS=""
-    fi
-fi
+# Автоматический тест нейросетей перед установкой
+test_status=0
+test_ai_services "$CURL_PROXY" || test_status=$?
 
-echo ""
-echo -e "${YELLOW}Проверяем связь с прокси ${PROXY_IP}:${PROXY_PORT} и страну в базе Google...${NC}"
-
-if [[ -n "$PROXY_USER" ]]; then
-    CURL_PROXY="socks5h://${PROXY_USER}:${PROXY_PASS}@${PROXY_IP}:${PROXY_PORT}"
-else
-    CURL_PROXY="socks5h://${PROXY_IP}:${PROXY_PORT}"
-fi
-
-EXT_IP=$(curl -x "$CURL_PROXY" -4 -m 10 -s https://api.ipify.org || true)
-if [[ -z "$EXT_IP" ]]; then
-    echo -e "${RED}ОШИБКА: Прокси не отвечает! Проверь IP, порт, логин и пароль (и что тип прокси SOCKS5).${NC}"
+if [ $test_status -eq 1 ]; then
+    echo -e "${RED}Прерываем установку, так как прокси недоступен.${NC}"
     exit 1
-fi
-
-GL=$(curl -x "$CURL_PROXY" -4 -m 10 -s https://www.youtube.com | grep -o '"GL":"[A-Z]*"' | head -n 1 || true)
-echo -e "Внешний IP прокси: ${GREEN}${EXT_IP}${NC}"
-echo -e "Страна в базе Google: ${GREEN}${GL:-Не определена}${NC}"
-
-if [[ "$GL" == '"GL":"RU"' ]]; then
-    echo -e "${RED}ВНИМАНИЕ: База Google считает этот прокси российским (\"GL\":\"RU\")! Gemini и Claude могут не работать.${NC}"
-    read -p "Всё равно продолжить установку? [y/N]: " CONT
+elif [ $test_status -eq 2 ]; then
+    read -p "Всё равно продолжить установку с этим прокси? [y/N]: " CONT
     [[ "$CONT" =~ ^[Yy]$ ]] || exit 1
 fi
 
@@ -649,5 +760,5 @@ esac
 
 echo ""
 echo -e "${GREEN}====================================================================${NC}"
-echo -e "${GREEN}   ВСЁ ГОТОВО! AI-Прокси ${EXT_IP} (${GL}) успешно подключен!${NC}"
+echo -e "${GREEN}   ВСЁ ГОТОВО! AI-Прокси успешно подключен и настроен!${NC}"
 echo -e "${GREEN}====================================================================${NC}"
