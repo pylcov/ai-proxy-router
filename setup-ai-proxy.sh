@@ -48,11 +48,16 @@ if [[ "$MODE_CHOICE" == "5" ]]; then
     echo -e "\n${YELLOW}Откатываем настройки AI-прокси в исходное состояние...${NC}"
     iptables -t nat -F PREROUTING 2>/dev/null || true
     iptables -t mangle -F PREROUTING 2>/dev/null || true
+    systemctl disable --now amnezia-ai-proxy.service 2>/dev/null || true
     systemctl disable --now amnezia-google-proxy.service 2>/dev/null || true
     systemctl disable --now amnezia-google-warp.service 2>/dev/null || true
+    systemctl disable --now sing-box.service 2>/dev/null || true
     systemctl disable --now redsocks 2>/dev/null || true
+    rm -f /etc/systemd/system/amnezia-ai-proxy.service /usr/local/bin/amnezia-ai-proxy.sh
     rm -f /etc/systemd/system/amnezia-google-proxy.service /usr/local/bin/amnezia-google-proxy.sh
     rm -f /etc/systemd/system/amnezia-google-warp.service /usr/local/bin/amnezia-google-warp.sh
+    rm -f /etc/systemd/system/sing-box.service /usr/local/bin/sing-box
+    rm -rf /etc/sing-box /etc/redsocks.conf
     systemctl daemon-reload
     if systemctl is-active --quiet docker; then
         systemctl restart docker
@@ -72,6 +77,7 @@ if row:
             r for r in cfg["routing"]["rules"]
             if r.get("outboundTag") not in ("ai-proxy", "gemini-proxy", "warp-proxy")
             and not (r.get("network") == "udp" and r.get("port") == "443" and ("geoip:google" in r.get("ip", []) or "geosite:openai" in r.get("domain", []) or "geosite:google-gemini" in r.get("domain", [])))
+            and not (r.get("outboundTag") in ("direct", "freedom") and "geosite:youtube" in r.get("domain", []))
         ]
     cur.execute("UPDATE settings SET value=? WHERE key='xrayTemplateConfig'", (json.dumps(cfg, indent=2),))
     conn.commit()
@@ -180,7 +186,7 @@ if [[ "$GL" == '"GL":"RU"' ]]; then
 fi
 
 # ==============================================================================
-# ФУНКЦИЯ 1: Настройка 3x-ui (с учетом выбранных сервисов)
+# ФУНКЦИЯ 1: Настройка 3x-ui (с учетом выбранных сервисов + умный обход YouTube)
 # ==============================================================================
 setup_3x_ui() {
     echo -e "\n${CYAN}---> Настраиваем 3x-ui (VLESS / Xray)...${NC}"
@@ -225,6 +231,8 @@ if direct_idx is not None and direct_idx > 0:
     direct_ob = outbounds.pop(direct_idx)
     outbounds.insert(0, direct_ob)
 
+direct_tag = next((o.get("tag") for o in outbounds if o.get("protocol") == "freedom"), "direct")
+
 server_obj = {
     "address": proxy_ip,
     "port": proxy_port
@@ -255,12 +263,29 @@ rules = [
     r for r in rules
     if r.get("outboundTag") not in ("ai-proxy", "gemini-proxy", "warp-proxy")
     and not (r.get("network") == "udp" and r.get("port") == "443" and ("geoip:google" in r.get("ip", []) or "geosite:openai" in r.get("domain", []) or "geosite:google-gemini" in r.get("domain", [])))
+    and not (r.get("outboundTag") in ("direct", direct_tag) and "geosite:youtube" in r.get("domain", []))
 ]
 
 ai_domains = []
 ai_ips = []
 
+# Если включен Google: YouTube направляем напрямую без рекламы (RU-регион сервера)
+new_rules = []
 if enable_google:
+    new_rules.append({
+        "type": "field",
+        "outboundTag": direct_tag,
+        "domain": [
+            "geosite:youtube",
+            "domain:youtube.com",
+            "domain:googlevideo.com",
+            "domain:youtu.be",
+            "domain:ytimg.com",
+            "domain:youtubei.googleapis.com",
+            "domain:youtubekids.com",
+            "domain:yt.be"
+        ]
+    })
     ai_domains.extend([
         "geosite:google-gemini",
         "geosite:google",
@@ -311,7 +336,6 @@ if enable_dev:
         "domain:copilot.microsoft.com"
     ])
 
-new_rules = []
 if ai_domains:
     new_rules.append({
         "type": "field",
@@ -354,45 +378,121 @@ print("Конфигурация 3x-ui успешно обновлена в БД!
 EOF
 
     systemctl restart x-ui
-    echo -e "${GREEN}✓ 3x-ui перезапущен! Выбранные сервисы успешно добавлены в маршрутизацию.${NC}"
+    echo -e "${GREEN}✓ 3x-ui перезапущен! YouTube идет напрямую без рекламы, AI-сервисы через прокси.${NC}"
 }
 
 # ==============================================================================
-# ФУНКЦИЯ 2: Настройка Amnezia VPN (с учетом выбранных сервисов)
+# ФУНКЦИЯ 2: Настройка Amnezia VPN (sing-box transparent routing с SNI-сниффингом)
 # ==============================================================================
 setup_amnezia() {
-    echo -e "\n${CYAN}---> Настраиваем Amnezia VPN...${NC}"
+    echo -e "\n${CYAN}---> Настраиваем Amnezia VPN с умной маршрутизацией через sing-box...${NC}"
     export DEBIAN_FRONTEND=noninteractive
-    apt-get install -y -qq redsocks ipset jq curl dnsutils >/dev/null 2>&1 || true
+    apt-get install -y -qq ipset jq curl dnsutils >/dev/null 2>&1 || true
 
-    AUTH_BLOCK=""
-    if [[ -n "$PROXY_USER" ]]; then
-        AUTH_BLOCK="    login = \"${PROXY_USER}\";
-    password = \"${PROXY_PASS}\";"
+    # Отключаем старый redsocks при наличии
+    systemctl disable --now redsocks 2>/dev/null || true
+    systemctl disable --now amnezia-google-proxy.service 2>/dev/null || true
+    rm -f /etc/systemd/system/amnezia-google-proxy.service /usr/local/bin/amnezia-google-proxy.sh
+
+    # Установка sing-box, если не установлен
+    if ! command -v sing-box >/dev/null 2>&1; then
+        echo -e "${YELLOW}Устанавливаем sing-box...${NC}"
+        ARCH=$(uname -m)
+        case "$ARCH" in
+            x86_64|amd64) SB_ARCH="amd64" ;;
+            aarch64|arm64) SB_ARCH="arm64" ;;
+            *) SB_ARCH="amd64" ;;
+        esac
+        SB_VER="1.14.4"
+        curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-linux-${SB_ARCH}.tar.gz" | tar -xz -C /tmp/
+        mv "/tmp/sing-box-${SB_VER}-linux-${SB_ARCH}/sing-box" /usr/local/bin/sing-box
+        chmod +x /usr/local/bin/sing-box
+        rm -rf "/tmp/sing-box-${SB_VER}-linux-${SB_ARCH}"
     fi
 
-    cat << EOF > /etc/redsocks.conf
-base {
-    log_debug = off;
-    log_info = on;
-    log = "syslog:daemon";
-    daemon = on;
-    redirector = iptables;
-}
-redsocks {
-    local_ip = 0.0.0.0;
-    local_port = 12345;
-    ip = ${PROXY_IP};
-    port = ${PROXY_PORT};
-    type = socks5;
-${AUTH_BLOCK}
+    # Генерация конфигурации sing-box
+    mkdir -p /etc/sing-box
+    AUTH_JSON=""
+    if [[ -n "$PROXY_USER" ]]; then
+        AUTH_JSON=",
+      \"username\": \"${PROXY_USER}\",
+      \"password\": \"${PROXY_PASS}\""
+    fi
+
+    cat << EOF > /etc/sing-box/config.json
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "redirect",
+      "tag": "redirect-in",
+      "listen": "0.0.0.0",
+      "listen_port": 12345
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    },
+    {
+      "type": "socks",
+      "tag": "ai-proxy",
+      "server": "${PROXY_IP}",
+      "server_port": ${PROXY_PORT}${AUTH_JSON}
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "domain_suffix": [
+          "youtube.com",
+          "googlevideo.com",
+          "youtu.be",
+          "ytimg.com",
+          "yt.be",
+          "ggpht.com",
+          "youtubei.googleapis.com",
+          "youtubekids.com"
+        ],
+        "outbound": "direct"
+      }
+    ],
+    "final": "ai-proxy"
+  }
 }
 EOF
 
-    systemctl enable redsocks >/dev/null 2>&1
-    systemctl restart redsocks
+    # Создание службы sing-box
+    cat << 'EOF' > /etc/systemd/system/sing-box.service
+[Unit]
+Description=sing-box service for Amnezia AI Smart Routing
+Documentation=https://sing-box.sagernet.org
+After=network.target nss-lookup.target
 
-    cat << EOF > /usr/local/bin/amnezia-google-proxy.sh
+[Service]
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
+Restart=always
+RestartSec=3s
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now sing-box.service
+
+    # Создание скрипта заполнения ipset и правил iptables
+    cat << EOF > /usr/local/bin/amnezia-ai-proxy.sh
 #!/bin/bash
 set -e
 
@@ -447,18 +547,18 @@ for SUBNET in 172.16.0.0/12 10.8.0.0/16; do
 done
 EOF
 
-    chmod +x /usr/local/bin/amnezia-google-proxy.sh
+    chmod +x /usr/local/bin/amnezia-ai-proxy.sh
 
-    cat << 'EOF' > /etc/systemd/system/amnezia-google-proxy.service
+    cat << 'EOF' > /etc/systemd/system/amnezia-ai-proxy.service
 [Unit]
 Description=Route Amnezia AI traffic through SOCKS5 Proxy
-After=network-online.target docker.service redsocks.service
+After=network-online.target docker.service sing-box.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStartPre=/bin/sleep 5
-ExecStart=/usr/local/bin/amnezia-google-proxy.sh
+ExecStartPre=/bin/sleep 2
+ExecStart=/usr/local/bin/amnezia-ai-proxy.sh
 RemainAfterExit=yes
 
 [Install]
@@ -466,8 +566,8 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable --now amnezia-google-proxy.service
-    echo -e "${GREEN}✓ Amnezia VPN настроена! Выбранные сервисы идут через прокси.${NC}"
+    systemctl enable --now amnezia-ai-proxy.service
+    echo -e "${GREEN}✓ Amnezia VPN настроена! YouTube идет напрямую без рекламы, AI-сервисы через прокси.${NC}"
 }
 
 # ==============================================================================
